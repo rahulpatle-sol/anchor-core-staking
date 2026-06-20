@@ -79,7 +79,8 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
     // Additional auxiliary variables
     let current_timestamp = Clock::get()?.unix_timestamp;
     let mut staked_timestamp: i64 = 0;
-    let mut staked_time: i64 = 0;
+    let mut last_claimed_timestamp: i64 = 0;
+    let mut has_last_claimed = false;
 
     for attribute in &attributes.attribute_list {
         if attribute.key == "staked" {
@@ -88,10 +89,15 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
         else if attribute.key == "staked_at" {
             staked_timestamp = staked_timestamp.checked_add(attribute.value.parse::<i64>().map_err(|_| ErrorCode::InvalidTimestamp)?).ok_or(ErrorCode::InvalidTimestamp)?;
             // Calculate the time (in seconds) since the asset was staked
-            staked_time = current_timestamp.checked_sub(staked_timestamp).ok_or(ErrorCode::InvalidTimestamp)?;
-            // Staked time in days
-            staked_time = staked_time.checked_div(SECONDS_PER_DAY).ok_or(ErrorCode::InvalidTimestamp)?;
-            require!(staked_time >= ctx.accounts.config.freeze_period as i64, ErrorCode::FreezePeriodNotElapsed);
+            let elapsed_seconds = current_timestamp.checked_sub(staked_timestamp).ok_or(ErrorCode::InvalidTimestamp)?;
+            // Elapsed time in days (for freeze period check)
+            let freeze_elapsed_days = elapsed_seconds.checked_div(SECONDS_PER_DAY).ok_or(ErrorCode::InvalidTimestamp)?;
+            require!(freeze_elapsed_days >= ctx.accounts.config.freeze_period as i64, ErrorCode::FreezePeriodNotElapsed);
+        }
+        else if attribute.key == "last_claimed_at" {
+            last_claimed_timestamp = attribute.value.parse::<i64>().map_err(|_| ErrorCode::InvalidTimestamp)?;
+            has_last_claimed = true;
+            // Do NOT push last_claimed_at — it gets removed on unstake
         }
         else {
             attributes_list.push(attribute.clone());
@@ -139,36 +145,44 @@ pub fn handler(ctx: Context<Unstake>) -> Result<()> {
 
     // Finally, we want to mint rewards to the user
 
-    // Calculate the amount
-    let amount =(staked_time as u64)
-        .checked_mul(ctx.accounts.config.rewards_bps as u64)
-        .ok_or(ErrorCode::InvalidRewardsBps)?
-        .checked_mul(10u64.pow(ctx.accounts.rewards_mint.decimals as u32))
-        .ok_or(ErrorCode::InvalidRewardsBps)?
-        .checked_div(10000u64)
-        .ok_or(ErrorCode::InvalidRewardsBps)?;
+    // Calculate remaining rewards since last claim
+    let reward_start = if has_last_claimed { last_claimed_timestamp } else { staked_timestamp };
+    let reward_seconds = current_timestamp.checked_sub(reward_start).ok_or(ErrorCode::InvalidTimestamp)?;
+    let reward_days = reward_seconds.checked_div(SECONDS_PER_DAY).ok_or(ErrorCode::InvalidTimestamp)?;
 
-    // Prepare signer seeds for config PDA
-    let config_seeds = &[
-        b"config",
-        collection_key.as_ref(),
-        &[ctx.accounts.config.bump],
-    ];
-    let config_signer_seeds = &[&config_seeds[..]];
+    if reward_days > 0 {
+        let amount = (reward_days as u64)
+            .checked_mul(ctx.accounts.config.rewards_bps as u64)
+            .ok_or(ErrorCode::InvalidRewardsBps)?
+            .checked_mul(10u64.pow(ctx.accounts.rewards_mint.decimals as u32))
+            .ok_or(ErrorCode::InvalidRewardsBps)?
+            .checked_div(10000u64)
+            .ok_or(ErrorCode::InvalidRewardsBps)?;
 
-    mint_to_checked(
-        CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            MintToChecked {
-                mint: ctx.accounts.rewards_mint.to_account_info(),
-                to: ctx.accounts.user_rewards_ata.to_account_info(),
-                authority: ctx.accounts.config.to_account_info(),
-            },
-            config_signer_seeds,
-        ),
-        amount,
-        ctx.accounts.rewards_mint.decimals,
-    )?;
+        let config_seeds = &[
+            b"config",
+            collection_key.as_ref(),
+            &[ctx.accounts.config.bump],
+        ];
+        let config_signer_seeds = &[&config_seeds[..]];
+
+        mint_to_checked(
+            CpiContext::new_with_signer(
+                ctx.accounts.token_program.to_account_info(),
+                MintToChecked {
+                    mint: ctx.accounts.rewards_mint.to_account_info(),
+                    to: ctx.accounts.user_rewards_ata.to_account_info(),
+                    authority: ctx.accounts.config.to_account_info(),
+                },
+                config_signer_seeds,
+            ),
+            amount,
+            ctx.accounts.rewards_mint.decimals,
+        )?;
+    }
+
+    // Decrement collection staking count
+    ctx.accounts.config.total_staked = ctx.accounts.config.total_staked.checked_sub(1).ok_or(ErrorCode::InvalidRewardsBps)?;
 
     Ok(())
 }

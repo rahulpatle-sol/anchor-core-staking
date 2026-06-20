@@ -54,18 +54,20 @@ pub fn handler(ctx: Context<Stake>) -> Result<()> {
     // Prepare the Attributes list to add or update based on the existing attributes
     let mut attributes_list: Vec<Attribute> = Vec::new();
 
-    // Loop to all attributes and save only the ones that are not the Staking attributes ("staked" and "staked_at")
+    // Loop to all attributes and save only the ones that are not the Staking attributes ("staked", "staked_at", "last_claimed_at")
     // If we find the "staked" attribute already present, we need to make sure the asset is not already staked
     if let Some(attributes) = &attributes_fetched {
         for attribute in &attributes.attribute_list {
             if attribute.key == "staked" {
                 require!(attribute.value == "false", ErrorCode::AlreadyStaked);
             }
-            else if attribute.key != "staked_at" {
+            else if attribute.key != "staked_at" && attribute.key != "last_claimed_at" {
                 attributes_list.push(attribute.clone());
             }
         }
     }
+
+    let now = Clock::get()?.unix_timestamp.to_string();
 
     // Add the Staking attributes
     attributes_list.push(Attribute {
@@ -74,8 +76,15 @@ pub fn handler(ctx: Context<Stake>) -> Result<()> {
     });
     attributes_list.push(Attribute {
         key: "staked_at".to_string(),
-        value: Clock::get()?.unix_timestamp.to_string(),
+        value: now.clone(),
     });
+    attributes_list.push(Attribute {
+        key: "last_claimed_at".to_string(),
+        value: now,
+    });
+
+    // Increment collection staking count
+    ctx.accounts.config.total_staked = ctx.accounts.config.total_staked.checked_add(1).ok_or(ErrorCode::InvalidRewardsBps)?;
 
     // Now that we have the complete list of Attributes we either add the Plugin or Update the existing one
     // The Attributes Plugin is an Authority-Managed Plugin, so it needs to be signed by the update authority (PDA of the program)

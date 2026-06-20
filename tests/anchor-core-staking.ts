@@ -167,6 +167,56 @@ describe("anchor-core-staking", () => {
     console.log("\nTime traveled in days", TIME_TRAVEL_IN_DAYS)
   });
 
+  it("Claim rewards without unstaking", async () => {
+    const userRewardsAta = getAssociatedTokenAddressSync(rewardsMint, provider.wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
+    const tx = await program.methods.claimRewards()
+    .accountsPartial({
+      owner: provider.wallet.publicKey,
+      updateAuthority,
+      config,
+      rewardsMint,
+      userRewardsAta,
+      asset: nftKeypair.publicKey,
+      collection: collectionKeypair.publicKey,
+      mplCoreProgram: MPL_CORE_PROGRAM_ID,
+      systemProgram: SystemProgram.programId,
+      tokenProgram: TOKEN_PROGRAM_ID,
+      associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+    })
+    .rpc();
+    console.log("\nYour transaction signature", tx);
+    const balance = (await provider.connection.getTokenAccountBalance(userRewardsAta)).value.uiAmount;
+    console.log("User rewards balance after claim", balance);
+  });
+
+  it("Try to claim rewards again immediately (should get NoRewardsToClaim)", async () => {
+    const userRewardsAta = getAssociatedTokenAddressSync(rewardsMint, provider.wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
+    try {
+      const tx = await program.methods.claimRewards()
+      .accountsPartial({
+        owner: provider.wallet.publicKey,
+        updateAuthority,
+        config,
+        rewardsMint,
+        userRewardsAta,
+        asset: nftKeypair.publicKey,
+        collection: collectionKeypair.publicKey,
+        mplCoreProgram: MPL_CORE_PROGRAM_ID,
+        systemProgram: SystemProgram.programId,
+        tokenProgram: TOKEN_PROGRAM_ID,
+        associatedTokenProgram: ASSOCIATED_TOKEN_PROGRAM_ID,
+      })
+      .rpc();
+      throw new Error(`Claim rewards should have failed with NoRewardsToClaim, but succeeded with tx: ${tx}`);
+    } catch (err) {
+      if (err instanceof anchor.AnchorError && err.error.errorCode.code === "NoRewardsToClaim") {
+        console.log("\nClaim rewards failed as expected:", err.error.errorMessage);
+      } else {
+        throw err;
+      }
+    }
+  });
+
   it("Unstake an NFT", async () => {
     // Get the user rewards ATA account
     const userRewardsAta = getAssociatedTokenAddressSync(rewardsMint, provider.wallet.publicKey, false, TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID);
